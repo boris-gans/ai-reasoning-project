@@ -18,6 +18,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the full game flow instead of the partial/local test.",
     )
+    parser.add_argument(
+        "--selfplay",
+        type=int,
+        default=0,
+        help="Run N local self-play games (my_agent vs my_agent).",
+    )
+    parser.add_argument(
+        "--play-agent",
+        choices=["1", "2"],
+        nargs="?",
+        const="1",
+        help="Play locally vs the agent; choose your player number (default: 1).",
+    )
     return parser.parse_args()
 
 
@@ -232,27 +245,208 @@ def my_agent(game: QuoridorGame) -> List:
         List: Move in format ['M', row, col] or ['W', row, col, 'H'/'V']
     """
     
-    # Get basic info
+    # Basic identifiers
     my_player = game.my_player
-    my_pos = game.get_my_position()
-    opp_pos = game.get_opponent_position()
-    
-    # ============================================================
-    # TODO: IMPLEMENT YOUR ALGORITHM HERE!
-    # ============================================================
-    
-    # Example: Random valid move (replace with your algorithm!)
-    moves = game.get_valid_pawn_moves() + game.get_valid_wall_moves(limit=10)
+    opponent = game.get_opponent(my_player)
+    root_state = game.state
 
-    # Just pick a random pawn move
-    return random.choice(moves)
-    
-    # ============================================================
-    # Ideas to implement:
-    # 1. Use shortest_path_length() to evaluate positions
-    # 2. Alpha-beta minimax with evaluation heuristic (e.g. my_path_length - opponent_path_length)
-    # 4. Strategic wall placement to maximize opponent's path
-    # ============================================================
+    # Search depth: keep shallow when walls are abundant, look a bit deeper in simplified endgames
+    search_depth = 2
+    total_walls = root_state['remaining_walls']['1'] + root_state['remaining_walls']['2']
+    if total_walls <= 4:
+        search_depth = 3
+
+    def opponent_of(player: str) -> str:
+        return '2' if player == '1' else '1'
+
+    def apply_move(state: Dict, player: str, move: List) -> Dict:
+        """Lightweight move application on a state dictionary."""
+        new_state = deepcopy(state)
+        if move[0] == 'M':
+            new_state['pawns'][player] = [move[1], move[2]]
+        else:
+            new_state['walls'].append([move[1], move[2], move[3]])
+            new_state['remaining_walls'][player] -= 1
+        return new_state
+
+    def evaluate_state(state: Dict) -> float:
+        """Heuristic evaluation using shortest path lengths and wall advantage."""
+        my_dist = game.shortest_path_length(my_player, state)
+        opp_dist = game.shortest_path_length(opponent, state)
+
+        if my_dist == 0:
+            return 1e6
+        if opp_dist == 0:
+            return -1e6
+
+        wall_diff = state['remaining_walls'][my_player] - state['remaining_walls'][opponent]
+        wall_penalty = -2 if state['remaining_walls'][my_player] == 0 and state['remaining_walls'][opponent] > 0 else 0
+
+        # Favor being ahead in the race (distance difference), keep some value on spare walls
+        return (opp_dist - my_dist) * 12 + wall_diff * 1.5 + wall_penalty
+
+    def should_sprint(state: Dict, player: str) -> bool:
+        """
+        Decide if we should ignore walls and just run (e.g., opponent has no walls,
+        or we are ahead enough with few walls left).
+        """
+        my_walls = state['remaining_walls'][player]
+        opp_walls = state['remaining_walls'][opponent_of(player)]
+        if my_walls == 0 and opp_walls > 0:
+            return True
+        if opp_walls == 0:
+            return True
+
+        my_dist = game.shortest_path_length(player, state)
+        opp_dist = game.shortest_path_length(opponent_of(player), state)
+
+        if my_dist + 1 < opp_dist and opp_walls <= 1:
+            return True
+        return False
+
+    def candidate_wall_moves(state: Dict, player: str) -> List[Tuple[float, List]]:
+        """
+        Score wall moves by how much they hurt the opponent without over-harming us.
+        Returns a list of (score, move) pairs.
+        """
+        if state['remaining_walls'][player] == 0:
+            return []
+
+        temp_game = QuoridorGame(json.dumps(state), 'playing', player, player)
+        raw_walls = temp_game.get_valid_wall_moves(player, limit=None)
+        if not raw_walls:
+            return []
+
+        opp = opponent_of(player)
+        my_pos = state['pawns'][player]
+        opp_pos = state['pawns'][opp]
+        existing = {(w[0], w[1], w[2]) for w in state['walls']}
+        base_my = game.shortest_path_length(player, state)
+        base_opp = game.shortest_path_length(opp, state)
+
+        scored = []
+        for move in raw_walls:
+            _, r, c, orient = move
+            near_opp = abs(r - opp_pos[0]) + abs(c - opp_pos[1]) <= 3
+            near_me = abs(r - my_pos[0]) + abs(c - my_pos[1]) <= 3
+
+            # Encourage extending existing barriers
+            extends = False
+            if orient == 'H':
+                extends = ((r, c - 1, 'H') in existing or (r, c + 1, 'H') in existing)
+            else:
+                extends = ((r - 1, c, 'V') in existing or (r + 1, c, 'V') in existing)
+
+            # Opening guideline: avoid random walls very early
+            if len(state['walls']) <= 1 and state['remaining_walls'][player] >= 8:
+                if not (near_opp or extends):
+                    continue
+
+            if not (near_opp or near_me or extends):
+                continue
+
+            next_state = apply_move(state, player, move)
+            new_opp = game.shortest_path_length(opp, next_state)
+            new_my = game.shortest_path_length(player, next_state)
+
+            opp_gain = new_opp - base_opp
+            my_cost = max(0, new_my - base_my)
+
+            # Demand the wall to add real tax to the opponent and not hurt us too much
+            if opp_gain < 1:
+                continue
+
+            score = opp_gain - 0.8 * my_cost
+            if near_opp:
+                score += 0.4
+            if extends:
+                score += 0.25
+
+            # If we are already well ahead, only keep walls that add a big detour
+            if (base_opp - base_my) >= 2 and opp_gain < 2:
+                continue
+
+            scored.append((score, move))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[:8]  # keep top candidates to control branching
+
+    def generate_moves(state: Dict, player: str) -> List[List]:
+        """Generate ordered moves for alpha-beta search."""
+        temp_game = QuoridorGame(json.dumps(state), 'playing', player, player)
+        pawn_moves = temp_game.get_valid_pawn_moves(player)
+
+        # Order pawn moves by how much they shorten our path
+        base_dist = game.shortest_path_length(player, state)
+        pawn_scored = []
+        for mv in pawn_moves:
+            next_state = apply_move(state, player, mv)
+            new_dist = game.shortest_path_length(player, next_state)
+            pawn_scored.append((base_dist - new_dist, mv))
+        pawn_scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Toggle race mode when walls are ineffective
+        if should_sprint(state, player):
+            return [mv for _, mv in pawn_scored]
+
+        wall_scored = candidate_wall_moves(state, player)
+        ordered = [mv for _, mv in pawn_scored] + [mv for _, mv in wall_scored]
+        return ordered
+
+    def minimax(state: Dict, player: str, depth: int, alpha: float, beta: float) -> float:
+        my_turn = player == my_player
+        my_dist = game.shortest_path_length(my_player, state)
+        opp_dist = game.shortest_path_length(opponent, state)
+
+        # Quick terminal checks
+        if my_dist == 0:
+            return 1e6
+        if opp_dist == 0:
+            return -1e6
+        if depth == 0:
+            return evaluate_state(state)
+
+        moves = generate_moves(state, player)
+        if not moves:
+            return evaluate_state(state)
+
+        if my_turn:
+            value = -float('inf')
+            for mv in moves:
+                child_state = apply_move(state, player, mv)
+                value = max(value, minimax(child_state, opponent_of(player), depth - 1, alpha, beta))
+                alpha = max(alpha, value)
+                if beta <= alpha:
+                    break
+            return value
+        else:
+            value = float('inf')
+            for mv in moves:
+                child_state = apply_move(state, player, mv)
+                value = min(value, minimax(child_state, opponent_of(player), depth - 1, alpha, beta))
+                beta = min(beta, value)
+                if beta <= alpha:
+                    break
+            return value
+
+    # Root search
+    best_score = -float('inf')
+    best_move = None
+    root_moves = generate_moves(root_state, my_player)
+
+    # If we somehow have no generated moves, fall back to any legal move
+    if not root_moves:
+        fallback = game.get_valid_pawn_moves() + game.get_valid_wall_moves(limit=10)
+        return random.choice(fallback)
+
+    for move in root_moves:
+        next_state = apply_move(root_state, my_player, move)
+        score = minimax(next_state, opponent, search_depth - 1, -float('inf'), float('inf'))
+        if score > best_score:
+            best_score = score
+            best_move = move
+
+    return best_move if best_move is not None else random.choice(root_moves)
 
 def test_partial(game_state: Optional[Dict] = None) -> Dict:
     """
@@ -303,6 +497,122 @@ def test_partial(game_state: Optional[Dict] = None) -> Dict:
 
     return next_game_state
 
+def self_play(num_games: int = 1, max_moves: int = 200, verbose: bool = True) -> List[Tuple[str, int]]:
+    """
+    Run my_agent vs itself locally (no server). Useful for quick behavioral smoke tests.
+    """
+    results = []
+
+    for game_idx in range(num_games):
+        state = {
+            'pawns': {'1': [0, 4], '2': [8, 4]},
+            'walls': [],
+            'remaining_walls': {'1': 10, '2': 10},
+            'current_player': '1',
+        }
+        winner = None
+
+        if verbose:
+            print(f"\n=== SELF-PLAY GAME {game_idx + 1}/{num_games} ===")
+
+        for ply in range(max_moves):
+            current_player = state['current_player']
+
+            state_payload = {
+                'pawns': state['pawns'],
+                'walls': state['walls'],
+                'remaining_walls': state['remaining_walls'],
+            }
+            game_obj = QuoridorGame(json.dumps(state_payload), 'playing', current_player, current_player)
+
+            move = my_agent(game_obj)
+            next_state = game_obj.simulate_move(move)
+
+            # Check for goal reach
+            if current_player == '1' and next_state['pawns']['1'][0] == 8:
+                winner = '1'
+            elif current_player == '2' and next_state['pawns']['2'][0] == 0:
+                winner = '2'
+
+            if verbose:
+                print(f"Player {current_player} plays {move}")
+
+            if winner:
+                if verbose:
+                    end_game = QuoridorGame(json.dumps(next_state), 'complete', current_player, current_player)
+                    end_game.print_board()
+                    print(f"Winner: Player {winner}\n")
+                break
+
+            # Switch player and continue
+            state = next_state
+            state['current_player'] = '2' if current_player == '1' else '1'
+
+        if not winner:
+            winner = '-'
+            if verbose:
+                print("Reached max moves; declaring draw.\n")
+
+        results.append((winner, game_idx))
+
+    return results
+
+def human_vs_agent(human_player: str = "1", max_moves: int = 200, verbose: bool = True):
+    """
+    Play locally against my_agent. human_player is "1" or "2".
+    """
+    agent_player = '2' if human_player == '1' else '1'
+    state = {
+        'pawns': {'1': [0, 4], '2': [8, 4]},
+        'walls': [],
+        'remaining_walls': {'1': 10, '2': 10},
+        'current_player': '1',
+    }
+    winner = None
+
+    if verbose:
+        print(f"\n=== HUMAN (Player {human_player}) vs AGENT (Player {agent_player}) ===")
+
+    for ply in range(max_moves):
+        current_player = state['current_player']
+
+        state_payload = {
+            'pawns': state['pawns'],
+            'walls': state['walls'],
+            'remaining_walls': state['remaining_walls'],
+        }
+
+        game_obj = QuoridorGame(json.dumps(state_payload), 'playing', current_player, current_player)
+        if current_player == human_player:
+            move = manual_player_solver(game_obj)
+        else:
+            move = my_agent(game_obj)
+
+        next_state = game_obj.simulate_move(move)
+
+        # Check for win
+        if current_player == '1' and next_state['pawns']['1'][0] == 8:
+            winner = '1'
+        elif current_player == '2' and next_state['pawns']['2'][0] == 0:
+            winner = '2'
+
+        if verbose:
+            print(f"Player {current_player} plays {move}")
+
+        if winner:
+            if verbose:
+                end_game = QuoridorGame(json.dumps(next_state), 'complete', current_player, human_player)
+                end_game.print_board()
+                print(f"Winner: Player {winner}\n")
+            break
+
+        # Switch turn
+        state = next_state
+        state['current_player'] = '2' if current_player == '1' else '1'
+
+    if not winner:
+        print("Reached max moves; draw.")
+
 def test_full():
     STUDENT_TOKEN = 'BORIS-GANS'  # e.g., 'JOHN-DOE'
     SOLVER = my_agent
@@ -331,7 +641,11 @@ def test_full():
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.full:
+    if args.play_agent:
+        human_vs_agent(human_player=args.play_agent, verbose=True)
+    elif args.selfplay > 0:
+        self_play(num_games=args.selfplay, verbose=True)
+    elif args.full:
         test_full()
     else:
         state = None
