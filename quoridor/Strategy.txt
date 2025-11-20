@@ -1,0 +1,721 @@
+Designing a High-Performance Quoridor Solver
+Overall Agent Architecture Options
+Quoridor is a complex game with a huge state space and branching factor – on par with or exceeding chess
+in complexity . This makes brute-force search impractical. Two classical AI approaches can be
+adapted for Quoridor:
+Minimax (Negamax) with Alpha-Beta Pruning: This approach searches a game tree of moves to a
+certain depth and uses an evaluation function for leaf nodes . Due to Quoridor’s large game tree,
+a full search to endgame is impossible, so depth must be limited and a heuristic evaluation is used to
+judge positions . Alpha-beta pruning cuts off branches that can’t possibly influence the final
+decision, which is essential for efficiency. A Minimax agent’s strength will depend on search depth
+and the quality of its evaluation function . Classic enhancements like move ordering and iterative
+deepening can also be applied to improve performance.
+Monte Carlo Tree Search (MCTS): MCTS explores the game by simulating many random play-outs
+(rollouts) and building a search tree based on statistical outcomes (wins/losses). It can effectively
+handle large, uncertain decision spaces by focusing on promising moves over time. However, pure
+MCTS (with totally random simulations) performs poorly in Quoridor because many moves
+(especially wall placements) are spurious or suboptimal. A successful Quoridor MCTS agent
+augments the basic algorithm with domain-specific knowledge at each stage of the search . For
+example, heuristics can bias which moves are explored (to reduce branching) and how rollouts are
+played (to simulate more realistic play). With the right heuristics, MCTS can converge on strong
+strategies given enough simulations.
+Each approach has trade-offs. A Minimax agent with a good evaluation can make precise, short-term
+tactical decisions (especially with alpha-beta reducing the search space), while an MCTS agent can consider
+longer-term outcomes through many simulations, given sufficient time. In practice, MCTS has shown great
+results for Quoridor when heavily informed by heuristics , whereas Minimax can be competitive with a
+shallow depth (e.g. depth 2-3) if it evaluates positions cleverly . The architecture choice may also be
+influenced by environment constraints (e.g. time per move and ease of implementation in a Jupyter
+notebook). It’s even possible to hybridize: for instance, using Minimax in late-game tactical races and MCTS
+in the more complex midgame, but such complexity is optional. The key is that any strong agent must
+incorporate heuristics to tame Quoridor’s complexity, either via an evaluation function or biased
+simulations.
+1 2
+•
+3
+4
+5
+•
+6
+6
+6
+7
+1
+Pawn Movement Heuristics
+Pawn movement is the core of Quoridor’s race-to-goal dynamic. Strong agents follow several heuristics
+when moving their pawn:
+Favor shortest-path moves: Whenever possible, choose pawn moves that keep you on one of the
+shortest paths to your goal . In other words, advance in a way that does not increase your
+distance-to-finish. This usually means moving forward (toward the opponent’s side) along a path that
+isn’t blocked. MCTS-based agents explicitly bias pawn moves toward shortest paths because it leads
+to faster wins . Mertens likewise noted that simply moving forward for its own sake can be
+counterproductive if that move doesn’t lie on a shortest route to the goal – you might walk into a
+dead-end or a trap. So, the pawn should advance efficiently, not just any-forward-move, but along
+optimal lanes.
+Keep multiple avenues open: Try to maintain more than one viable path toward the goal, especially
+while the opponent still has wall resources. If you commit your pawn to a single narrow corridor, a
+single well-placed wall by the opponent could drastically lengthen your route. By staying near the
+center and not hugging one wall or one route too tightly in the midgame, you force the opponent to
+expend multiple walls to significantly slow you down. This means you might sometimes delay
+moving straight forward if doing so would funnel you into an easily blockable path – instead, you
+could move in a way that preserves two symmetric paths. Maintaining path flexibility is a subtle but
+important heuristic to avoid getting “walled in.”
+Avoid retreating or wasting moves: Generally, do not move your pawn backward or sideways away
+from the goal unless there is a tactical reason. Every pawn move should ideally net progress or
+improve your position relative to the opponent. In simulations of MCTS, a pawn move backwards is
+actually used as a punishment when a player has no walls left (to signify their disadvantage) . In
+actual play, moving backward is almost always suboptimal, as it increases your distance to the goal
+for no benefit. The only time a side-step or non-forward move might be justified is if it contributes to
+the “multiple paths” idea above or if it sets up a favorable pawn alignment (like enabling a jump).
+Capitalize on jump opportunities: Quoridor’s rules allow a special move when the two pawns face
+each other. If your pawn is directly adjacent to the opponent’s pawn, you can jump over them
+(landing immediately behind them) provided the landing square is open. This can be a powerful
+move as it advances you two steps in one turn . If that landing square is not open due to a fence
+or the board edge, you are allowed to jump diagonally to either side ahead of the opponent .
+Skilled play involves setting up or taking advantage of these pawn-to-pawn encounters. For example,
+if your opponent’s pawn is in front of you with a wall right behind them, you can jump diagonally
+and potentially gain a tempo. The heuristic here is: be aware of pawn alignment. Sometimes moving
+your pawn to face the opponent can create a tactical opportunity on your next move to leap ahead.
+Conversely, avoid positions where the opponent can easily jump you and gain extra distance.
+Exploit wall count situations: The availability of walls dramatically shifts pawn strategy. If your
+opponent has no walls left, you should commit to an unimpeded pawn race – just keep moving
+toward the goal, since they have no way to slow you down by placing new walls . In this scenario,
+placing any of your own walls is usually unnecessary (unless it outright wins you the game) because
+your pawn’s progress can’t be stopped. On the flip side, if you have no walls left, recognize that
+•
+8
+8
+9
+•
+•
+8
+•
+10
+11 12
+•
+13
+2
+you’re at a strategic disadvantage in terms of flexibility. You cannot delay your opponent anymore,
+so every move counts. Avoid any detours or hesitant moves; focus on sprinting to the finish. In fact,
+the MCTS agent of Lee penalizes the player with zero walls in rollouts (by forcing a backward move)
+to reflect how being out of walls tends to lead to a losing situation . Take that as a cue: try to
+avoid getting to zero walls unless you’re clearly winning the race, and if you do find yourself wall-
+less, shift entirely to an aggressive pawn race mindset.
+Wall Placement Heuristics
+Walls are your key tool for influencing the opponent’s path (and occasionally, protecting or guiding your
+own). High-level principles for strong wall placement include:
+Force maximum detours: Aim to place fences in such a way that the opponent must take as many
+extra steps as possible to get to their goal . The ideal wall causes the opponent not just to step
+aside once, but perhaps to go around a longer obstacle or snake back and forth. For example, a
+horizontal wall placed directly in front of the opponent’s pawn will force them to move around it,
+effectively making them go up and then down (or vice versa) before they can progress – this
+increases the distance to their goal. In Mertens’ terms, a good wall maximizes the opponent’s “moves
+to next column”, i.e. how many moves to advance one row forward . If you can force the opponent
+to divert sideways and spend 3-4 moves just to advance one row, that’s a high-impact wall.
+Place walls near the opponent’s pawn (in their path): A well-timed wall directly in the opponent’s
+path can immediately thwart their progress . Walls closer to the opponent have a more
+immediate effect on their shortest route. Commonly, players place a horizontal wall one row ahead
+of the opponent (and offset to one side) when the opponent is about to get ahead – this makes the
+opponent go around the wall. Placing a wall too far ahead of the opponent might be premature (they
+might circumvent it long before reaching it), and placing it right on the opponent (adjacent to their
+square) might be easily bypassed in one move. So, there is an art to placing it at just the right spot to
+maximize inconvenience. Lee’s AI limits its wall consideration mostly to those near the pawns for this
+reason .
+Extend existing walls: Try to add walls adjacent to ones that are already on the board (either placed
+by you or your opponent) to form longer barriers . Two connected walls can force a larger detour
+than two isolated ones. For instance, if you or your opponent has already placed a wall, adding
+another perpendicular to it can create an “L” shape that the pawn must walk around. Or placing a
+wall parallel to an existing wall a couple squares apart can create a wider blocked region. Lee’s MCTS
+agent specifically favors wall positions “near the already placed walls” as probable good moves –
+this is because extending a wall often continues an ongoing strategy (strengthening a blockade) and
+can compound the opponent’s troubles.
+Utilize edge positions when advantageous: Don’t neglect the board edges for wall placement. In
+fact, placing walls at the extreme left or right (especially horizontal walls spanning the edge
+columns) can effectively box an opponent in . A wall on the far left or right edge can close off a
+route that goes around the side, forcing the opponent back toward the center (and potentially into
+another wall). The Quoridor AI by Lee included “leftmost or rightmost horizontal walls” in its set of
+probable strong moves . The idea is that by sealing the edges, you remove the shortest bypass
+around any central walls, thereby making your central walls more effective. These edge walls are
+8
+•
+14
+15
+•
+16
+16
+•
+16
+16
+•
+16
+16
+3
+situational, but if the opponent is trying to skirt around your barriers via the side of the board, an
+edge wall will stop that plan cold.
+Avoid wasteful or self-defeating walls: Every wall placement should serve a clear purpose. Don’t
+place a wall just for the sake of doing something – a poorly placed wall can be a double waste (it
+uses one of your limited walls and may do little to the opponent, or even accidentally make your
+path longer). For example, putting a wall far away from both pawns or adding a wall that the
+opponent can circumvent in one step is usually wasted. Likewise, be careful not to block yourself.
+Always evaluate your shortest path as well to ensure your wall doesn’t force you into a longer route
+than before. A classic blunder is accidentally boxing your own pawn in while trying to trap the
+opponent. A good heuristic is to simulate the shortest-path distances before and after a prospective
+wall: the wall is only worthwhile if it significantly increases the opponent’s distance to goal without
+increasing yours (except in cases where you’re willing to sacrifice some length of your path because
+you have a lead or other compensation).
+Conserve walls for critical moments: Walls are a finite resource (each player typically has 10).
+Strong play often involves saving some walls for the mid-late game where a single wall can make or
+break the race. There’s a tension: if you never use your walls, you might lose by not slowing the
+opponent enough; if you use them too freely, you might run out and then have no answer to a later
+surge by the opponent. Many top agents and players hold a couple of walls in reserve until a clear
+opportunity arises – for instance, to block the opponent when they are one move from victory. Lee’s
+MCTS agent implicitly teaches the value of wall conservation by penalizing states with no walls
+remaining . In practical terms, don’t exhaust your supply early. Use just enough walls to keep
+the opponent at bay or to gain an advantage, but always try to keep at least one for the endgame
+unless you’re certain you can win without any left. A single well-placed wall at the right time can
+decide the game, so make sure you have one when it matters.
+(Always remember: a wall placement is only legal if it doesn’t completely block the opponent’s path to their goal –
+the game rules enforce that at least one path must remain open . The environment’s move validator will
+prevent illegal placements, but as an AI designer you should also conceptually understand that any strategy must
+still leave a path. The best wall placements severely lengthen the remaining path without eliminating it outright.)
+Evaluation Function Design
+When using a Minimax-style search, a well-crafted evaluation function is crucial to assess board states that
+are not endgame wins or losses. A typical evaluation function in board games is a weighted sum of features
+:
+where each is a feature metric and is its weight. For a Quoridor solver (avoiding neural
+networks and sticking to handcrafted heuristics), useful evaluation features include:
+Distance to Goal: The most important factor is how far each player is from winning. Use the shortest
+path length from each pawn to its goal (this can be obtained via BFS using
+shortest_path_length(player, state) ). Let be your pawn’s shortest path to the finish
+and the opponent’s. A simple but effective feature is the distance difference:
+•
+•
+8
+17
+5
+Eval(state) = w f (state) +1 1 w f (state) +2 2 ⋯ + w f (state),n n
+f (state)i wi
+•
+dme
+dopp f =distDiff
+4
+. If this value is positive, it means the opponent’s route is longer than yours (good for
+you); if negative, you are behind. This feature directly captures the race dynamic. Mertens’ paper
+noted that features should ideally reflect the true progress to goal rather than naive measures .
+In fact, the features that performed best in his tests were those related to shortest path distances
+(his f3 and f4 approximated this by looking at the next step) . Modern implementations can
+directly use full shortest-path distances since we have a fast BFS available. You might weight this
+feature very highly, as it correlates strongly with winning chances.
+Progress and Positional Advantage: A simpler feature, used in early research, is just the number of
+rows (or columns) your pawn has advanced from the start line – basically how far across the board
+you are . We can call that the position feature. Similarly, one can use the difference in such
+progress between you and the opponent (how many more rows you’ve advanced than the opponent)
+. However, be cautious: as Mertens found, a feature that blindly rewards moving forward (like f1
+= pawn’s row number) can be misleading . It might encourage moves that step into a dead-end or
+off the optimal path just to gain a row. If you include a raw progress feature, it should have a
+relatively low weight and ideally be paired with the shortest-path feature to ensure those forward
+moves are actually meaningful. In other words, distance-to-goal is superior to distance-from-start, but
+the latter can still add some nuance to the evaluation (for example, in an open board, advancing
+forward is good, but its weight must be tuned down to zero once walls come into play heavily).
+Wall Count Difference: Another critical aspect of a state is how many walls remain for each player. If
+you have more walls left than the opponent, that usually gives you a strategic advantage (you have
+more opportunities to thwart them). So include a feature like
+. This can be weighted to slightly favor having more walls. The weight
+shouldn’t be too large (because walls unused don’t directly win the game – they’re a potential, not an
+actual advantage), but it should reflect that, for instance, if you’ve burned all your walls and the
+opponent still has many, you’re in a precarious position. This feature could be scaled in terms of half-
+moves of distance. For example, one wall might be “worth” a certain number of moves of distance in
+the evaluation. In practice you might give each wall difference the equivalent of, say, 1-2 moves of
+advantage in your eval sum. The exact weight can be empirically tuned.
+Immediate Move Difficulty: Mertens introduced features (f3 and f4) measuring the minimum steps
+needed for each player to reach the next column (i.e., to advance one row toward the goal) .
+This captures how well the opponent has placed walls in front of you (or you in front of them) in the
+very short term. If your pawn can move into the next row in one step but the opponent requires four
+moves (because perhaps a wall forces a detour), that’s a significant short-term advantage. You can
+incorporate this idea by checking, for example, if a wall is immediately in front of a pawn. However,
+since we already have the full shortest path distance, this feature is partly redundant – the shortest
+path length will account for all walls in the way, not just the next one. The benefit of a “next step
+difficulty” feature might be that it exaggerates very local obstacles which could translate to tactical
+opportunities (e.g., if the opponent is stuck and must spend several moves just to make one row of
+progress, maybe you can use that time to sprint ahead). If included, such a feature should be
+designed to reward states where the opponent’s next move is not straight-forward. For instance,
+could be the minimum moves for opponent to advance one row, and for
+you; you’d want to maximize opponent’s and minimize yours.
+d −opp dme
+18
+18
+•
+19
+20
+9
+•
+f =wallDiff (myRemainingWalls −
+oppRemainingWalls)
+•
+15 21
+foppNextSteps fmyNextSteps
+5
+Goal Reachability / Trapping: In extreme cases, a player might be effectively trapped or significantly
+bottled up by walls (though never completely closed off, due to the rules). If the opponent’s shortest
+path is extraordinarily long (compared to an average game length), it might indicate a nearly
+winning position for you. You could incorporate nonlinear evaluations for very large distances, or a
+feature that triggers if is above some threshold (meaning the opponent is extremely far away or
+has to basically traverse the whole board back and forth). Similarly, if becomes very large (you’ve
+been heavily detoured), that’s a bad sign. These conditions may be implicitly handled by the distance
+difference feature, but it’s something to consider if you want the eval to recognize when a position is
+essentially won/lost (short of the actual win condition).
+When crafting the evaluation, speed is vital. We will be evaluating many states during search, so each
+feature should be quick to compute. Fortunately, path lengths via BFS on a 9x9 board are fast (the state
+space for BFS is at most 81 nodes, and walls simply remove edges – this is very manageable). Still, avoid
+overly complicated features that require heavy computation. Mertens pointed out that if a feature is too
+slow to calculate, you’re better off not using it and instead deepening the search by one ply with that time
+. In our case, BFS for distances is fine, but something like analyzing complex patterns of walls might be
+overkill under time constraints.
+Weight tuning for the evaluation function might require some experimentation. Mertens used a manual
+guess followed by testing different combinations of features . You can do similar: start with intuitive
+weights (e.g., distance difference gets a high weight, wall count a moderate weight, etc.) and then play the
+agent against itself or weaker agents to see if it exhibits reasonable behavior. Adjust if you notice
+pathological behavior (e.g., if it overvalues walls and starts doing nothing but wall placements, reduce that
+weight, or if it races too recklessly, maybe increase the weight on wall count or increase opponent distance
+weight). In the absence of machine learning, this is an iterative manual process.
+Finally, note that if you opt for an MCTS-based solver, you won’t use a static evaluation function in the same
+way – MCTS evaluates positions by simulation. However, you can incorporate some of the above ideas into
+MCTS rollouts or as a bias in the selection phase (for example, you might prefer expanding a node where
+your eval function is higher). But typically, with MCTS the focus is on the rollout policy rather than an eval
+function. For Minimax though, a solid eval function like the one described is your engine for strong play.
+Search Strategy and Algorithms
+Choosing and tuning the search algorithm is fundamental to building a strong solver. Here are strategies
+for both Minimax and MCTS-based agents, along with tips on depth control, move ordering, and combining
+these approaches:
+Minimax with Alpha-Beta Pruning: This strategy will systematically explore possible moves and
+counter-moves up to a certain depth. Given Quoridor’s branching factor (often around 60 moves per
+position on average , mostly due to wall placements), you must keep the depth modest. Many
+implementations use depth = 2 or 3 (meaning 2 moves by each player, or 3 moves by the maximizing
+player and 3 by the minimizing in a full ply count) as a baseline. Mertens’ agent, for example, used
+depth-2 searches in experiments . Deeper is better, but the number of nodes grows exponentially
+with depth, so without heavy pruning or heuristics, depth 3 or 4 could become infeasible in a live
+setting. Alpha-beta pruning will help a lot by cutting off branches that are clearly worse than an
+already explored alternative. To get the most out of alpha-beta:
+•
+dopp
+dme
+22
+23
+•
+2
+7
+6
+Move Ordering: Try to evaluate the most promising moves first, so that alpha-beta finds beta-
+cutoffs early. For Quoridor, good heuristic ordering might be: pawn moves first (since moving
+straight toward the goal is often a good default), and among wall moves, perhaps sort them by some
+heuristic value (e.g., how much they increase opponent distance or decrease your distance). If you
+have an evaluation function, you can even use it to score each possible move by applying the move
+and evaluating the resulting state quickly, then order moves by that score. This extra step can pay off
+by pruning large parts of the tree.
+Branching Factor Reduction: Incorporate domain knowledge to prune moves before searching. As
+discussed, not all 64 theoretical wall placements need to be considered. You might generate all
+moves with get_valid_moves() , then filter that list. For example, discard wall moves that are far
+from both pawns or that barely affect shortest path lengths. Lee’s MCTS agent effectively does this
+during search by only considering “probable” wall positions , and you can do the same in
+Minimax. If using get_valid_wall_moves(limit) , consider setting limit to focus on walls
+within a certain range of the action or using it to retrieve a subset. Reducing branching factor is
+critical to search deeper.
+Quiescence / Extended Search: In Quoridor, “quiescence” is not as standard a concept as in games
+like chess (where you might search further during volatile capturing sequences). But there is an
+analogy: if a move (like a wall placement) dramatically changes the situation (e.g., suddenly the
+opponent’s path becomes very long), you might want to search one extra ply to see the immediate
+response (maybe the opponent has a quick counter-wall or move). You can consider extending the
+search by one ply in such cases to avoid the horizon effect where the evaluation might incorrectly
+judge a dramatic wall placement as super good without seeing that the opponent had an easy out.
+This is an advanced optimization – a simpler approach is to just increase depth generally if possible.
+Iterative Deepening & Time Management: If your environment allows a flexible time per move
+(e.g., a few seconds), you can implement iterative deepening: first search depth 1, then 2, then 3,
+etc., until time runs out. This ensures you always have at least a move found (at lower depth) and the
+deeper searches improve it progressively. Iterative deepening also synergizes with move ordering
+(the order from shallow searches can be reused to guide deeper searches).
+Transposition Table: Using a dictionary to memoize states you’ve evaluated can save time if the
+search revisits a position via a different sequence of moves (which can happen in Quoridor due to
+transposition – e.g., two different move orders might lead to the same wall configuration and pawn
+positions). Storing evaluated states with their scores and best moves can avoid redundant work. Just
+be mindful of memory and the state representation (you need a hashable representation of the
+board state).
+Endgame Optimization: As noted earlier, if both players run out of walls, the game is a simple race.
+You can detect this condition in your search: if at a node state get_remaining_walls(1) == 0
+and get_remaining_walls(2) == 0 , you might directly evaluate it by who is closer to the goal
+(or even simulate the remaining moves quickly). This can save search depth for other more complex
+states. Essentially, the search can “short-circuit” to an outcome once no walls are left, since optimal
+play from there is just moving along shortest paths .
+Monte Carlo Tree Search (MCTS): For Quoridor, MCTS has the appeal of not requiring a handcrafted
+evaluation function, and it naturally handles the high branching factor by sampling. But to make
+MCTS efficient, we inject the same kind of heuristic knowledge into its phases:
+•
+•
+24
+•
+•
+•
+•
+25
+•
+7
+Selection & Expansion: Use a UCT (Upper Confidence Bound) formula to balance exploration and
+exploitation when traversing the tree. The formula typically is , where is
+the total simulation wins from child i, is visits to child i, is visits to the current node, and is
+the exploration constant. In Quoridor AI, Kyutae Lee found that a smaller exploration constant
+(around 0.2) gave better results than the more standard 0.5 in later versions – presumably
+because a lower made the AI more exploitation-focused, which worked well with the heuristics in
+a deterministic game like Quoridor. You might need to experiment with this parameter.
+Probabilistic Move Pruning: When selecting and expanding nodes, do not consider every possible
+wall. Just like in Minimax, MCTS can limit which moves get expanded. Lee’s agent only expands
+probable moves – e.g., a handful of candidate walls plus the pawn moves . You can implement a
+function to generate a filtered list of moves (e.g., all pawn moves, and then walls that meet certain
+criteria) for the expansion. This keeps the branching factor of the tree manageable. In the selection
+phase, if a node is not fully expanded, you pick one of the unexpanded but probable moves to add as
+a new node.
+Heuristic Rollouts: The simulation (rollout) phase is where you play random moves until the game
+ends (or a depth limit). Pure random play in Quoridor will produce very poor approximations of a
+position’s value because random wall placements are usually nonsense. Instead, bias the simulation
+with simple tactics:
+One effective rollout policy is: move along the shortest path most of the time. In Lee’s
+implementation, during a rollout each turn the algorithm moves the pawn on a shortest-
+path-to-goal with probability 0.7 (70%) . This ensures progress toward victory in the
+simulation.
+With the remaining probability (30% in this case), it places a random “probable wall” (from the
+same kind of limited set we discussed) if that player still has walls available . This
+introduces some defensive/offensive wall play into the rollout instead of blindly running
+forward every time – but keeps it reasonable by only doing so occasionally and in plausible
+spots.
+If the player has no walls left, the rollout policy might do something else. Lee’s AI actually
+makes the pawn do a backwards move in the 30% case when it has no walls, as a way to
+penalize that side . This is an interesting trick: it effectively simulates that a player with no
+walls is at such a disadvantage that they are “wasting” moves (moving backward) – thus that
+simulation is likely to result in a loss for the wall-less player. This bias causes the MCTS
+statistics to prefer strategies that avoid running out of walls too early. You could implement a
+milder version of this if you want (the exact backward move isn’t a real strategy in actual play,
+but it serves the purpose in simulation of skewing outcomes).
+You can also incorporate the opponent’s wall count in the rollout policy: for instance, if the
+opponent has 0 walls, maybe your rollout policy always just moves the pawn (since there’s no
+point in placing walls anymore). Conversely, if your agent has a big wall surplus in the
+simulation, it might occasionally use more of them.
+It’s not necessary to simulate all the way to game end if that’s too slow. You could rollout for a
+fixed number of moves and then evaluate with a simpler function (like the eval described
+above). But given Quoridor’s average game length ~91 plies and that a biased simulation
+will likely end the game relatively quickly (one side will reach the goal in well under 91 moves
+if neither places walls endlessly), many implementations do simulate to a terminal condition
+for clarity.
+•
+U CB1 = +ni
+wi C ni
+ln N wi
+ni N C
+26
+C
+•
+24
+•
+◦
+8
+◦
+8
+◦
+8
+◦
+◦
+27
+8
+Backpropagation: After each simulation, propagate the result (win/loss) up the tree. It’s standard –
+just ensure each node records the outcomes correctly. Over many iterations, the tree will guide itself
+toward better moves.
+Managing MCTS iterations: Decide on the number of rollouts (simulations) or time budget per
+move. Lee’s Quoridor AI, for example, ran about 60,000 rollouts for a “strong” level move , which
+is quite high, but it achieved a strong performance. In a Jupyter setting, 60k simulations might be
+too slow in Python, so you may opt for fewer (a few thousand) or optimize the simulation code
+heavily. MCTS is an “anytime” algorithm – it can return a best guess for a move after any number of
+iterations – so you can adjust the rollout count based on how much time you have. Even a few
+thousand targeted simulations with the above heuristics can produce a reasonable move.
+Rollout Result Bias: One can also incorporate a slight bias in the rollout result counting. For
+example, not just counting wins/losses, but possibly weighting wins that occur faster a bit higher, or
+if using a non-terminal rollout (stopped early), using an evaluation of that state as a pseudo-result.
+These are more advanced tweaks; a straightforward win/loss outcome should suffice if rollouts go to
+completion.
+Hybrid strategies: Some agents use MCTS in the midgame but switch to a depth-limited minimax in
+the endgame (where the branching factor is lower because walls are few or none). This can combine
+the strengths of both approaches – MCTS handles the maze-like middle, and Minimax handles
+precise racing at the end. Implementing such a switch is complex but worth mentioning as a design
+pattern. For example, your solver could do: if total remaining walls < X, use Minimax at depth Y;
+otherwise use MCTS. Ensure both approaches use a consistent move format and can generate
+moves from the given state.
+Opening Strategies: The opening phase (first few moves) can be guided by known good moves to
+avoid the algorithms flailing in a very symmetric, open position. Lee’s agent includes a few common
+opening sequences hard-coded for the first <6 plies of the game . You may consider adding a
+simple opening book or heuristic rules for the first moves. Examples might include: “Always move
+your pawn forward on the first move” – this is common since an immediate wall placement can be
+premature. Another might be: if you’re second player and the opponent moved pawn, you move
+pawn as well (to not fall behind in development). Some players use an early wall to create a slight
+asymmetry – for instance, one known idea is to place a wall such that the opponent is forced slightly
+off-center in their path (gaining a long-term advantage in the race). If you identify such patterns
+from literature or experimentation, you can encode them. The benefit of guiding the opening is that
+it steers the game into a configuration where your search or simulation has more structure to work
+with. Just be cautious not to hard-code too deeply; 2-3 moves per side is usually enough of an
+“opening book” for Quoridor, after which the agent can take over with general search.
+Midgame Search Considerations: During the midgame, both search and simulation need to deal
+with a mix of pawn moves and wall moves. It can be beneficial to adapt search depth dynamically.
+For example, if one player has very few walls left, the nature of the game is closer to a pure race –
+you might deepen the search a bit since the branching factor will drop once walls are nearly
+exhausted (fewer wall moves to consider). On the contrary, in early midgame when, say, each side
+still has >5 walls, the number of possible wall placements each turn is huge – it might be better to
+use MCTS or limit depth to 2 in those situations. An adaptive strategy could be: if total walls
+remaining in the game > 10, use a rollout-based approach (MCTS) for breadth; if <= 10, perhaps a
+deeper minimax to calculate precise outcomes. This is a design choice and can be refined by testing.
+•
+•
+28
+•
+•
+•
+29
+•
+9
+Opening, Midgame, and Endgame Guidelines
+Different phases of Quoridor require different emphasis. Here are some phase-specific guidelines,
+complementing the heuristics above:
+Opening:
+Develop your pawn: In the absence of any walls, the fastest way to win is simply to move forward 9
+steps. So, it’s natural to start by moving a pawn toward the center. Advancing to the middle of the
+board (around row 5 for the starting side) is usually a good early goal. It gives you a lead and also
+central position.
+Don’t waste walls too early: Since each player has a limited number of walls, dropping one in the very
+early game can be risky. If you place a wall before the pawns have even approached it, the opponent
+has ample space to detour around with minimal cost. Most strong openings involve no walls for the
+first couple of moves at least, unless responding to something the opponent did.
+Mirror and respond: If you are the second player (moving after the opponent), a common strategy is
+to mirror the opponent’s pawn moves to maintain symmetry and not fall behind. For example, if they
+move up one, you move up one. This ensures you stay at least level in the race. If the opponent
+places an early wall, take a moment to evaluate: is that wall actually effective or was it a bluff? Often
+the best response to an early wall is to simply move your pawn anyway (ignore the wall’s presence
+until it actually matters) or to place a counter-wall that nullifies its effect. Don’t panic and start using
+all your walls in reply; keep calm and stick to your plan of moving forward unless that wall truly
+forces a detour now.
+Use walls to shape long-term paths: If you do choose to place a wall in the opening, have a clear
+motive. One possible idea is a defensive wall that makes your own path to victory easier. For example,
+sometimes players place a wall behind their pawn as they move, to prevent the opponent from easily
+coming into their side or to prepare a future blocking of the opponent. Another idea is an offensive
+wall placed slightly off-center in front of the opponent, aiming to push them toward a flank. These
+ideas tie into common patterns; you can experiment with known sequences (for instance, some
+sources discuss an opening where each player places a wall in a symmetric fashion creating a zig-zag
+path – the one who does it more efficiently can gain an edge).
+Keep it flexible: In the first 2-3 moves, avoid committing to a path or strategy that can’t be adjusted.
+The beauty of Quoridor’s opening is that you usually have many options (the board is open). Use that
+flexibility to your advantage – e.g., position your pawn such that you threaten to go left or right
+around a potential wall, so if the opponent walls one side, you can choose the other.
+Midgame:
+This is the phase where most wall placements and strategic maneuvering happen. Both pawns are
+typically around the middle of the board, and players start deploying walls in earnest to gain an
+advantage.
+Maintain dual paths: As mentioned, try to always have at least two routes to reach the goal. If the
+opponent places a wall blocking one route, immediately assess an alternate path (maybe around the
+other side of that wall, or a completely different corridor). You might even preemptively move in such
+a way that you set up two routes. For example, if one route goes to the left of a certain obstacle and
+another to the right, position your pawn such that you are roughly in between those routes until you
+•
+•
+•
+•
+•
+•
+•
+•
+•
+10
+must commit. This makes the opponent’s next wall decision harder – whichever route they block, you
+take the other.
+Use walls to create a maze: Coordinate your wall placements to make the opponent zig-zag. One wall
+might make them go around it, two walls can force them into a longer “U” turn. Plan a few moves
+ahead with your walls. For instance, if you drop a horizontal wall at row 5, column 4-5, you might
+already be thinking that on your next wall, you’ll drop another horizontal wall at row 6, column 5-6,
+which together will form a contiguous barrier two rows high. The opponent now has to go around
+either end of this two-wall barrier. If your opponent has fewer walls than you, you can even plan a
+sequence like this knowing they won’t be able to respond enough times. Always be mindful that
+every wall you place also affects your path – make sure you still have a way through or around your
+own maze.
+Wall exchanges: Often midgame sees “wall tennis” – you place a wall to slow the opponent, and on
+their turn they might place a wall to slow you (instead of immediately trying to move). There’s a
+balance here: if you’re ahead in the race, you don’t mind a trade of walls because you can maintain
+your lead, but if you’re behind and you both spend a wall each turn, you remain behind (and both
+just waste resources). So if behind, you might switch strategy: instead of answering a wall with a
+wall, you might just keep moving to catch up, essentially banking that their wall placement cost
+them a tempo that you can use to close the distance.
+Recognize when to switch to race mode: At some point in the midgame, maybe after a flurry of walls,
+one player will decide to dash for the finish. A key skill is knowing when to stop placing walls and
+start running. If you think you’ve achieved a position where the opponent’s path is sufficiently long
+that they can’t catch you even if you just move every turn, that’s the moment to switch to pure pawn
+moves. Conversely, if the opponent suddenly stops placing walls and starts running, you need to
+evaluate if you should also abandon wall plans and run, or use one more wall to ensure they can’t
+overtake. This decision can be informed by the distance difference and wall count: for example, “I’m 3
+moves from goal, they are 5 moves from goal, and neither of us has a wall left to play – just run” or “I’m 4
+moves from goal, they are 6 moves but have 1 wall which they will surely use on me if I get ahead – maybe
+I should wall them once more instead of moving”.
+Pawn positioning tactics: Sometimes you can use your pawn as a tactical block. One scenario: if you
+manage to get directly in front of your opponent’s pawn, you temporarily stop their advance until
+they either jump you or go around. If you also have a wall behind you in that scenario, the opponent
+is forced to go around (jump-diagonally) which effectively costs them extra moves . Such
+configurations can’t be relied on regularly, but be aware of opportunities where your pawn’s position
+relative to the opponent can hinder them. This can occur when the two pawns get close; one might
+try to “shoulder” the other off a ideal path.
+Counting moves: In midgame, start mentally or programmatically counting the move advantage. If
+you can estimate “if we both sprint from here, I need X moves, they need Y moves,” that gives you a
+sense of your strategy. If X < Y comfortably, you can play more safely; if X is only slightly less than Y
+but you have more walls, you might use a wall to increase Y; if X > Y (you’re behind), you either need
+to shorten your path (sometimes you can do that by breaking a longer path – e.g., if you have placed
+some walls earlier that are now slowing you more than them, perhaps you miscalculated), or you
+absolutely must use a wall to lengthen their path and equalize.
+Endgame:
+The endgame starts when one or both pawns can reach the goal in just a handful of moves and wall
+supplies are low. Often by this time, one player might have 0-1 walls left and the other maybe similar.
+•
+•
+•
+•
+11
+•
+•
+•
+11
+If no walls remain (for either side): This simplifies to a pure pawn race. In this situation, the outcome is
+basically determined by who is closer to their goal and whose turn it is. There’s no further strategy
+except to run. As an agent, you should identify this scenario and play the shortest path moves to
+goal every turn . No fancy tricks – just don’t make a mistake like stepping sideways. If you’re
+ahead, maintain your lead; if you’re behind, you’ll likely lose unless the opponent errs (which a good
+agent won’t). One minor tactic: if you are behind by exactly one move, sometimes the turn order can
+save you – e.g., if you move onto the goal in the same number of moves as the opponent, but you
+started second, you actually win because you reached in your move and the game ends before they
+get their final move. This is something the agent logic will inherently handle by computing actual
+shortest-path lengths in plies (moves considering turn order).
+If one side has walls and the other doesn’t: The side with remaining walls should use them at the most
+impactful moment. Usually, the ideal is to place a wall when the opponent is just a move or two away
+from winning, to force them into a detour. That single wall might buy you the 1-2 moves you need to
+win the race. A common pattern: if your opponent is charging toward the finish and will win in, say,
+two moves, and you cannot catch up in time, you place a wall directly in front of them on their
+penultimate move. This often turns their 2 moves into 3 (or more) moves, giving you enough time to
+win. Make sure the wall placement actually does slow them – it should be placed on the tile they are
+about to step into next turn. If you’re the side with no walls and the opponent still has one, you must
+assume they will do this to you. Therefore, if you suspect the opponent has saved a wall for such a
+scenario, you might need to be more than one move ahead in the race. Sometimes the only hope for
+the wall-less player is to try to force the wall placement early (maybe by feinting a different route so
+the opponent uses the wall sub-optimally) or, if you’re already in a losing position, hope the
+opponent misplaces it. A well-designed agent won’t misplace it, so essentially the no-wall side should
+play with urgency.
+Mutual wall standoffs: Sometimes both players enter the endgame with 1 or 2 walls left each. This
+becomes a delicate dance – it’s a bit of a game of chicken on who uses their wall first. If you’re ahead,
+you might not use your wall until the opponent does (because you don’t need to, you’re winning as
+is). If you’re behind, you might have to use a wall to try to get ahead. In human play, players
+sometimes hold walls until the absolute final moments. In AI, you’d handle this by continuing to
+search deeper. Usually the one who is behind in pure distance will end up placing a wall to try to
+equalize. As an agent, you should simulate both possibilities: if I use a wall here, do I win? If I don’t
+and just move, what happens? This can be resolved by the search algorithm naturally – it will see the
+outcomes of “wall now” vs “wall later”.
+Avoid unnecessary walls: A common endgame mistake is placing a wall when you don’t need to. For
+example, if you are ahead in distance and the opponent has no walls, placing a wall could actually
+slow you down more than them (if poorly placed) or simply waste time. Trust the evaluation – if it
+says you’re winning by just moving, then just move. Walls are not magic winning buttons; they are
+tools to use when the situation calls for it. If your agent’s evaluation function properly accounts for
+distance-to-goal, it will tell you when a wall move doesn’t improve that difference enough. The agent
+should only place a wall in endgame if it changes the outcome from a loss to a win or a draw to a win.
+Plan the final stretch: Endgames can also involve anticipating the finish line. For instance, if you will
+reach the goal in 2 moves, make sure you aren’t inadvertently allowing the opponent to do the same
+in 1 move on their turn (this could happen if the pawns are neck-and-neck and one can use the jump
+rule). Always consider the opponent’s response. Good endgame play often requires looking 1-2
+moves ahead precisely – which is why having a depth-2 or 3 Minimax in the endgame is very useful
+to compute these “I move, you move, I move, I win” scenarios.
+•
+25
+•
+•
+•
+•
+12
+By following these opening, midgame, and endgame guidelines, the agent will handle each phase of the
+game with an appropriate strategy – from the cautious, flexible development of the opening, through the
+combinatorial wall placements of the midgame, to the tactical race of the endgame.
+Efficiency Tips for a Jupyter-Based Implementation
+Implementing the solver in a Jupyter notebook (likely in Python) presents some practical considerations. We
+need to maximize performance given the high-level environment. Here are tips to keep the solver efficient
+and manageable:
+Leverage Provided Game Methods: Use the helper methods from the environment whenever
+possible, as they are likely optimized and well-tested. For example, get_valid_moves() will
+return all legal moves (both pawn and wall moves) in one call – use this instead of generating moves
+manually. If you need to separate pawn moves vs wall moves, use get_valid_pawn_moves() and
+get_valid_wall_moves(limit) . The limit parameter for wall moves might allow you to
+specify a subset (check the environment’s documentation). It could be designed to return only a
+certain number of wall moves or those within a certain region of interest. If, for instance,
+get_valid_wall_moves(2) returns walls within 2 squares of either pawn, that could directly
+implement the “probable wall” heuristic. Using these functions not only saves coding effort but also
+taps into likely optimized routines (possibly in C or at least well-structured Python).
+State Representation and Copying: simulate_move(move) is your friend for exploring
+hypothetical moves. It returns a new game state object after applying the move. This is very handy
+for both Minimax and MCTS. However, be mindful of Python object creation overhead. If you are
+doing thousands of simulations, creating a brand-new state for each move might be slow. One idea
+is to implement a simple state cache: you could memoize states by a hash (like a tuple of pawn
+positions and remaining walls and wall placements) to avoid re-simulating moves from scratch if you
+revisit a state. However, implementing a full cache might be complex given the large state space.
+Alternatively, in Minimax, consider using an undo mechanism: if the game API doesn’t have an
+explicit undo, you can simulate a move, get the new state, then simulate the inverse of that move to
+return to the original state. For pawn moves, the inverse is easy (move the pawn back). For wall
+placements, the inverse is removing the wall (which you could perhaps do by having a method to
+remove a wall or by storing the original state and coming back to it). If undo is not feasible, try to
+reuse state objects by keeping track of differences. For example, rather than actually placing a wall
+on the board data structure, you might maintain a set of walls separately and just logically consider
+it placed for evaluation. But this can get complicated – using simulate_move is safer to ensure
+rules (like path connectivity) are enforced.
+Optimize Distance Calculations: Since shortest_path_length(player, state) will be called
+often, ensure it’s used efficiently. It likely does a BFS internally. BFS on an 81-vertex graph is quite
+fast, but doing it tens of thousands of times could still add up. If you find distance calculations are a
+bottleneck, consider caching results within a search. For example, in a Minimax search, the state’s
+distances for both players could be stored as part of the evaluation. If you generate a child state by
+moving a pawn, you can update the distance for just that pawn (it will be the old distance minus one,
+usually) and leave the opponent’s distance unchanged. For a wall placement, you know only the
+opponent’s or your distance might increase (never decrease) due to the added wall, so you could
+recompute just the affected player’s BFS distance and reuse the other’s from the parent state. These
+•
+•
+•
+13
+small optimizations can save time by not recomputing both distances every time. In MCTS, you
+might pre-compute the starting state’s distances once, and during rollouts update distances on the
+fly as moves are made (since rollouts are sequential moves). This is micro-optimization, but it could
+help if done carefully.
+Parallelize if Possible: Jupyter (and Python in general) has tools for parallel computing (like
+multiprocessing or joblib). If you have the ability to use multiple cores (not always available in a
+notebook environment), you could parallelize MCTS rollouts or explore different branches of
+Minimax in parallel. For example, you could split the set of moves at the root among several
+processes. However, be cautious with synchronization (especially for MCTS, where processes need to
+share the tree). A simpler way if allowed: use a C/C++ extension or Numba to speed up critical loops
+(like the BFS or the rollout loop). Cython could also be used in the notebook to compile parts of the
+code.
+Profiling and Testing: Use Python’s %timeit and %prun (profile) magics in Jupyter to benchmark
+your functions. For instance, test how long get_valid_moves() and simulate_move() take, or
+how many nodes your Minimax searches at depth 3. This will inform where to cut complexity or add
+heuristics. If depth 3 is too slow, stick to depth 2 or improve pruning. If MCTS 5000 iterations is too
+slow, reduce iterations or simplify the rollout policy.
+Memory Considerations: If using a transposition table or caching states, be mindful of memory.
+Represent board states in a compact form (maybe a tuple of pawn coordinates and a bitstring or
+tuple for wall placements). Python dictionaries can handle a moderate number of states, but don’t let
+it balloon indefinitely (maybe clear it every new move or limit its size with an LRU strategy).
+Use vectorized operations for move filtering: If you end up doing custom move filtering (like
+checking distance of each wall to the pawn), try to avoid Python loops over 64 wall positions for
+every state. You could precompute a list of wall positions (like coordinates) and maybe an array of
+distances from each wall position to, say, the center or the pawn positions, and then filter using
+numpy where conditions. It might or might not be overkill, but anything to move logic out of pure
+Python loops could help for performance.
+Jupyter-specific tips: Since you’re in a notebook, keep your code organized in cells and reuse state
+where possible. For example, construct the game object once and reuse it (if the game state can be
+cloned, that’s fine). Avoid printing large outputs during search (that can slow things drastically). Use
+debugging prints sparingly or only for small depths. Given that this is an interactive setup, you can
+iteratively refine your agent and test against simple scenarios in the notebook, which is great for
+development but always test the worst-case performance (like near the end of the game with lots of
+walls placed in complex patterns) to ensure your heuristics hold up.
+In summary, building a high-performing Quoridor solver requires a combination of smart strategy and
+efficient implementation. By synthesizing the insights from MCTS with heuristics and the classic
+Minimax with evaluation approach , you can create an agent that intelligently balances offense
+(pawn advancement) and defense (strategic wall placement). Use the above heuristics to guide the agent’s
+choices, employ search algorithms that suit the phase of the game, and optimize your code to explore as
+many good moves as possible within the time available. With careful design, your Quoridor AI will make
