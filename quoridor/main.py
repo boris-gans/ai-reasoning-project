@@ -11,9 +11,6 @@ from quoridor.game_client import GameClient
 from quoridor.quoridor_game import QuoridorGame
 
 
-BASE_URL = 'https://ie-aireasoning-gr4r5bl6tq-ew.a.run.app'  # Your Cloud Run URL
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Quoridor tests or full game.")
     parser.add_argument(
@@ -246,7 +243,7 @@ def my_agent(game: QuoridorGame) -> List:
     
     # Example: Random valid move (replace with your algorithm!)
     moves = game.get_valid_pawn_moves() + game.get_valid_wall_moves(limit=10)
-        
+
     # Just pick a random pawn move
     return random.choice(moves)
     
@@ -288,7 +285,7 @@ def test_partial(game_state: Optional[Dict] = None) -> Dict:
 
     move = my_agent(test_game)
     print(f"\nYour solver chose: {move}")
-
+    
     # Apply the move locally and prepare the next state
     updated_state = test_game.simulate_move(move)
     next_player = test_game.get_opponent(current_player)
@@ -312,6 +309,7 @@ def test_full():
     MULTIPLAYER = False
     MATCH_ID = None
     NUM_GAMES = 1
+    BASE_URL = 'https://ie-aireasoning-gr4r5bl6tq-ew.a.run.app'  # Your Cloud Run URL
 
     result = play_game(
         solver=SOLVER,
