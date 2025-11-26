@@ -286,6 +286,10 @@ class QuoridorGame:
             return False
         return self._path_exists_to_goal(player, new_lookup)
 
+
+
+
+
     def get_valid_pawn_moves(self, player: Optional[str] = None) -> List[List]:
         """Get valid pawn moves for player."""
         if player is None:
