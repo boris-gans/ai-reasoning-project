@@ -1,5 +1,4 @@
 import json
-import random
 from typing import List, Optional, Dict
 from copy import deepcopy
 from collections import deque
@@ -97,6 +96,196 @@ class QuoridorGame:
 
         return False
 
+    def _build_wall_lookup(self, walls) -> set:
+        """Fast lookup set for wall membership checks."""
+        return {(w[0], w[1], w[2]) for w in walls}
+
+    def _is_wall_blocking_lookup(self, wall_lookup: set, from_pos, to_pos) -> bool:
+        """Set-based variant of wall blocking check used by fast BFS routines."""
+        r1, c1 = from_pos
+        r2, c2 = to_pos
+
+        def has_wall(r, c, orient):
+            return (r, c, orient) in wall_lookup
+
+        if r2 < r1 and c1 == c2:
+            return has_wall(r2, c1, 'H') or has_wall(r2, c1 - 1, 'H')
+        elif r2 > r1 and c1 == c2:
+            return has_wall(r1, c1, 'H') or has_wall(r1, c1 - 1, 'H')
+        elif c2 < c1 and r1 == r2:
+            return has_wall(r1, c2, 'V') or has_wall(r1 - 1, c2, 'V')
+        elif c2 > c1 and r1 == r2:
+            return has_wall(r1, c1, 'V') or has_wall(r1 - 1, c1, 'V')
+
+        return False
+
+    def _neighbors_without_walls(self, pos, wall_lookup: set):
+        """Yield reachable neighbors from pos given a wall lookup."""
+        r, c = pos
+        for new_r, new_c in [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]:
+            if 0 <= new_r < 9 and 0 <= new_c < 9:
+                if not self._is_wall_blocking_lookup(wall_lookup, (r, c), (new_r, new_c)):
+                    yield (new_r, new_c)
+
+    def _path_exists_to_goal(self, player: str, wall_lookup: set) -> bool:
+        """Check reachability to the goal row with early-exit BFS."""
+        start = tuple(self.state['pawns'][player])
+        goal_row = 8 if player == '1' else 0
+        queue = deque([start])
+        visited = {start}
+
+        while queue:
+            pos = queue.popleft()
+            if pos[0] == goal_row:
+                return True
+            for neighbor in self._neighbors_without_walls(pos, wall_lookup):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        return False
+
+    def _shortest_path_cells(self, player: str, wall_lookup: set) -> List[tuple]:
+        """Return one shortest path as a list of cells for heuristic targeting."""
+        start = tuple(self.state['pawns'][player])
+        goal_row = 8 if player == '1' else 0
+
+        parents = {start: None}
+        queue = deque([start])
+
+        while queue:
+            pos = queue.popleft()
+            if pos[0] == goal_row:
+                path = []
+                curr = pos
+                while curr is not None:
+                    path.append(curr)
+                    curr = parents[curr]
+                return list(reversed(path))
+
+            for neighbor in self._neighbors_without_walls(pos, wall_lookup):
+                if neighbor not in parents:
+                    parents[neighbor] = pos
+                    queue.append(neighbor)
+
+        return []
+
+    def _wall_anchor_distance(self, wall, cell: List[int]) -> int:
+        """Manhattan distance from a wall's anchor to a board cell."""
+        r, c, _ = wall
+        return abs(r - cell[0]) + abs(c - cell[1])
+
+    def _wall_near_point(self, wall, cell: List[int], radius: Optional[int]) -> bool:
+        """Check if wall anchor lies within radius of a given cell."""
+        if radius is None:
+            return True
+        return self._wall_anchor_distance(wall, cell) <= radius
+
+    def _wall_near_path(self, wall, path_cells: List[tuple], radius: Optional[int]) -> bool:
+        """Check if wall is near any cell on a path."""
+        if radius is None:
+            return True
+        if not path_cells:
+            return False
+        return any(self._wall_anchor_distance(wall, cell) <= radius for cell in path_cells)
+
+    def _wall_extends_existing(self, wall, wall_lookup: set) -> bool:
+        """Light heuristic: prefer walls that extend an existing barrier."""
+        r, c, orient = wall
+        if orient == 'H':
+            return (r, c - 1, 'H') in wall_lookup or (r, c + 1, 'H') in wall_lookup
+        return (r - 1, c, 'V') in wall_lookup or (r + 1, c, 'V') in wall_lookup
+
+    def _all_wall_positions(self):
+        """Iterate over every legal wall coordinate (without validation)."""
+        for r in range(9):
+            for c in range(8):
+                yield (r, c, 'H')
+        for r in range(8):
+            for c in range(9):
+                yield (r, c, 'V')
+
+    def _generate_wall_candidates(self, player: str, strategy: str, wall_lookup: set,
+                                  limit: Optional[int]) -> List[List]:
+        """
+        Produce a pruned, ordered list of wall candidates using heuristics.
+
+        Strategies:
+            - 'path_focus' (default): favor walls near opponent path/pawn and existing barriers.
+            - 'proximity': larger net; near either pawn or either shortest path.
+            - 'exhaustive': consider every slot (still runs path checks later).
+        """
+        configs = {
+            'path_focus': {'path_radius': 3, 'pawn_radius': 3, 'candidate_cap': 70},
+            'proximity': {'path_radius': 4, 'pawn_radius': 4, 'candidate_cap': 110},
+            'exhaustive': {'path_radius': None, 'pawn_radius': None, 'candidate_cap': None}
+        }
+        cfg = configs.get(strategy, configs['path_focus'])
+
+        # Inflate candidate cap a bit when a limit is requested so we still find enough valid walls.
+        candidate_cap = cfg['candidate_cap']
+        if limit is not None:
+            if candidate_cap is None:
+                candidate_cap = limit * 3
+            else:
+                candidate_cap = max(candidate_cap, limit * 2)
+
+        opponent = self.get_opponent(player)
+        my_pos = self.state['pawns'][player]
+        opp_pos = self.state['pawns'][opponent]
+
+        opp_path = self._shortest_path_cells(opponent, wall_lookup)
+        my_path = self._shortest_path_cells(player, wall_lookup)
+
+        scored_candidates = []
+        for wall in self._all_wall_positions():
+            extends = self._wall_extends_existing(wall, wall_lookup)
+            near_opp_path = self._wall_near_path(wall, opp_path, cfg['path_radius'])
+            near_my_path = self._wall_near_path(wall, my_path, cfg['path_radius'])
+            near_opp_pawn = self._wall_near_point(wall, opp_pos, cfg['pawn_radius'])
+            near_my_pawn = self._wall_near_point(wall, my_pos, cfg['pawn_radius'])
+
+            if strategy == 'exhaustive':
+                keep = True
+            elif strategy == 'proximity':
+                keep = near_opp_path or near_my_path or near_opp_pawn or near_my_pawn or extends
+            else:  # path_focus
+                keep = near_opp_path or (near_opp_pawn and (near_opp_path or near_my_path)) or (extends and (near_opp_pawn or near_opp_path))
+
+            if not keep:
+                continue
+
+            score = 0.0
+            if near_opp_path:
+                score += 3.0
+            if near_opp_pawn:
+                score += 1.8
+            if extends:
+                score += 0.8
+            if near_my_pawn:
+                score += 0.5
+            if near_my_path:
+                score += 0.2
+
+            score -= self._wall_anchor_distance(wall, opp_pos) * 0.05
+            scored_candidates.append((score, [wall[0], wall[1], wall[2]]))
+
+        scored_candidates.sort(key=lambda x: x[0], reverse=True)
+        if candidate_cap is not None:
+            scored_candidates = scored_candidates[:candidate_cap]
+
+        return [wall for _, wall in scored_candidates]
+
+    def _wall_preserves_paths(self, wall, player: str, wall_lookup: set) -> bool:
+        """Check that adding wall keeps at least one path for both players."""
+        new_lookup = set(wall_lookup)
+        new_lookup.add((wall[0], wall[1], wall[2]))
+        opponent = self.get_opponent(player)
+
+        if not self._path_exists_to_goal(opponent, new_lookup):
+            return False
+        return self._path_exists_to_goal(player, new_lookup)
+
     def get_valid_pawn_moves(self, player: Optional[str] = None) -> List[List]:
         """Get valid pawn moves for player."""
         if player is None:
@@ -146,13 +335,15 @@ class QuoridorGame:
 
         return moves
 
-    def get_valid_wall_moves(self, player: Optional[str] = None, limit: int = None) -> List[List]:
+    def get_valid_wall_moves(self, player: Optional[str] = None, limit: int = None,
+                             strategy: str = "path_focus") -> List[List]:
         """
-        Get valid wall placements for player.
+        Get valid wall placements for player using heuristics and path safety checks.
         
         Args:
             player: Player to get walls for (defaults to current player)
-            limit: Maximum number of wall moves to return (for efficiency)
+            limit: Maximum number of wall moves to return after validation
+            strategy: Wall generation strategy ('path_focus', 'proximity', 'exhaustive')
         """
         if player is None:
             player = self.current_player
@@ -160,43 +351,23 @@ class QuoridorGame:
         if self.get_remaining_walls(player) == 0:
             return []
 
-        # NOTE: Checking all wall placements is expensive!
-        # For performance, you may want to limit the number checked
-        # or implement strategic wall placement heuristics
-        
-        moves = []
         walls = self.get_walls()
+        wall_lookup = self._build_wall_lookup(walls)
+        candidates = self._generate_wall_candidates(player, strategy, wall_lookup, limit)
 
-        # This is computationally expensive - consider limiting in your implementation
-        # Try horizontal walls (simplified - only checks some positions)
-        if limit:
-            # Sample some random positions instead of checking all
-            positions = [(r, c) for r in range(9) for c in range(8)]
-            random.shuffle(positions)
-            positions = positions[:limit]
-            
-            for r, c in positions:
-                if self._is_valid_wall_simple([r, c, 'H'], walls):
-                    moves.append(['W', r, c, 'H'])
-            
-            positions = [(r, c) for r in range(8) for c in range(9)]
-            random.shuffle(positions)
-            positions = positions[:limit]
-            
-            for r, c in positions:
-                if self._is_valid_wall_simple([r, c, 'V'], walls):
-                    moves.append(['W', r, c, 'V'])
-        else:
-            # Check all positions (slow!)
-            for r in range(9):
-                for c in range(8):
-                    if self._is_valid_wall_simple([r, c, 'H'], walls):
-                        moves.append(['W', r, c, 'H'])
+        moves = []
+        for wall in candidates:
+            if not self._is_valid_wall_simple(wall, walls):
+                continue
+            if not self._wall_preserves_paths(wall, player, wall_lookup):
+                continue
+            moves.append(['W', wall[0], wall[1], wall[2]])
+            if limit is not None and len(moves) >= limit:
+                break
 
-            for r in range(8):
-                for c in range(9):
-                    if self._is_valid_wall_simple([r, c, 'V'], walls):
-                        moves.append(['W', r, c, 'V'])
+        # If a tight heuristic returns nothing, retry with exhaustive once.
+        if not moves and strategy != 'exhaustive':
+            return self.get_valid_wall_moves(player=player, limit=limit, strategy='exhaustive')
 
         return moves
 

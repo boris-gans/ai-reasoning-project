@@ -10,6 +10,9 @@ from collections import deque
 from quoridor.game_client import GameClient
 from quoridor.quoridor_game import QuoridorGame
 
+# Wall generation tuning: options are 'path_focus', 'proximity', 'exhaustive'
+WALL_STRATEGY = "path_focus"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Quoridor tests or full game.")
@@ -47,6 +50,7 @@ def play_game(
     verbose: bool = True
 ) -> Tuple:
     client = GameClient(base_url, token, debug=debug)
+    session_turn_times: List[float] = []
 
     if match_id is None:
         if verbose:
@@ -99,6 +103,7 @@ def play_game(
         
         game = game_class(game_state['state'], game_state['status'], game_state['player'], player)
 
+        game_turn_times: List[float] = []
         move_count = 0
         while game_state['status'] != 'complete':
             game_state = client.get_game_state(match_id, game_num)
@@ -119,7 +124,11 @@ def play_game(
                     print(f"🤔 Your turn (Player {player})...")
 
                 try:
+                    start_time = time.perf_counter()
                     move = solver(game)
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    game_turn_times.append(elapsed_ms)
+                    session_turn_times.append(elapsed_ms)
 
                     if verbose:
                         if hasattr(move, '__iter__') and not isinstance(move, str):
@@ -131,6 +140,7 @@ def play_game(
                                 print(f"   Move: {move}")
                         else:
                             print(f"   Move: {move}")
+                        print(f"⏱️ Solver time: {elapsed_ms:.1f} ms")
 
                     client.make_move(match_id, player, move)
                     move_count += 1
@@ -150,6 +160,9 @@ def play_game(
         if verbose:
             game.print_board()
             print("=" * 40)
+            if game_turn_times:
+                avg_ms = sum(game_turn_times) / len(game_turn_times)
+                print(f"⏱️ Turn timing this game: avg {avg_ms:.1f} ms, max {max(game_turn_times):.1f} ms over {len(game_turn_times)} turns")
 
         winner = game_state['winner']
         if winner == '-':
@@ -174,6 +187,10 @@ def play_game(
             print(f"\n📊 Current Record: {wins}W - {losses}L - {draws}D")
             print(f"   Games Remaining: {num_games - game_num - 1}\n")
 
+    if session_turn_times and verbose:
+        avg_ms = sum(session_turn_times) / len(session_turn_times)
+        print(f"⏱️ Overall solver timing: avg {avg_ms:.1f} ms, max {max(session_turn_times):.1f} ms across {len(session_turn_times)} turns")
+
     # Return results
     stats = {
         'wins': wins,
@@ -184,6 +201,9 @@ def play_game(
         'player': player,
         'match_id': match_id
     }
+    if session_turn_times:
+        stats['avg_turn_ms'] = sum(session_turn_times) / len(session_turn_times)
+        stats['max_turn_ms'] = max(session_turn_times)
 
     return stats, all_results
 
@@ -313,7 +333,7 @@ def my_agent(game: QuoridorGame) -> List:
             return []
 
         temp_game = QuoridorGame(json.dumps(state), 'playing', player, player)
-        raw_walls = temp_game.get_valid_wall_moves(player, limit=None)
+        raw_walls = temp_game.get_valid_wall_moves(player, limit=None, strategy=WALL_STRATEGY)
         if not raw_walls:
             return []
 
@@ -436,7 +456,7 @@ def my_agent(game: QuoridorGame) -> List:
 
     # If we somehow have no generated moves, fall back to any legal move
     if not root_moves:
-        fallback = game.get_valid_pawn_moves() + game.get_valid_wall_moves(limit=10)
+        fallback = game.get_valid_pawn_moves() + game.get_valid_wall_moves(limit=10, strategy=WALL_STRATEGY)
         return random.choice(fallback)
 
     for move in root_moves:
@@ -477,8 +497,10 @@ def test_partial(game_state: Optional[Dict] = None) -> Dict:
     print(f"My path length: {test_game.shortest_path_length('1')}")
     print(f"Opponent path length: {test_game.shortest_path_length('2')}")
 
+    start_time = time.perf_counter()
     move = my_agent(test_game)
-    print(f"\nYour solver chose: {move}")
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    print(f"\nYour solver chose: {move} (took {elapsed_ms:.1f} ms)")
     
     # Apply the move locally and prepare the next state
     updated_state = test_game.simulate_move(move)
@@ -514,6 +536,7 @@ def self_play(num_games: int = 1, max_moves: int = 200, verbose: bool = True) ->
 
         if verbose:
             print(f"\n=== SELF-PLAY GAME {game_idx + 1}/{num_games} ===")
+        turn_times: List[float] = []
 
         for ply in range(max_moves):
             current_player = state['current_player']
@@ -525,7 +548,10 @@ def self_play(num_games: int = 1, max_moves: int = 200, verbose: bool = True) ->
             }
             game_obj = QuoridorGame(json.dumps(state_payload), 'playing', current_player, current_player)
 
+            start_time = time.perf_counter()
             move = my_agent(game_obj)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            turn_times.append(elapsed_ms)
             next_state = game_obj.simulate_move(move)
 
             # Check for goal reach
@@ -535,7 +561,7 @@ def self_play(num_games: int = 1, max_moves: int = 200, verbose: bool = True) ->
                 winner = '2'
 
             if verbose:
-                print(f"Player {current_player} plays {move}")
+                print(f"Player {current_player} plays {move} ({elapsed_ms:.1f} ms)")
 
             if winner:
                 if verbose:
@@ -553,6 +579,10 @@ def self_play(num_games: int = 1, max_moves: int = 200, verbose: bool = True) ->
             if verbose:
                 print("Reached max moves; declaring draw.\n")
 
+        if turn_times and verbose:
+            avg_ms = sum(turn_times) / len(turn_times)
+            print(f"⏱️ Timing: avg {avg_ms:.1f} ms, max {max(turn_times):.1f} ms over {len(turn_times)} turns")
+
         results.append((winner, game_idx))
 
     return results
@@ -569,6 +599,7 @@ def human_vs_agent(human_player: str = "1", max_moves: int = 200, verbose: bool 
         'current_player': '1',
     }
     winner = None
+    agent_turn_times: List[float] = []
 
     if verbose:
         print(f"\n=== HUMAN (Player {human_player}) vs AGENT (Player {agent_player}) ===")
@@ -585,8 +616,12 @@ def human_vs_agent(human_player: str = "1", max_moves: int = 200, verbose: bool 
         game_obj = QuoridorGame(json.dumps(state_payload), 'playing', current_player, current_player)
         if current_player == human_player:
             move = manual_player_solver(game_obj)
+            elapsed_ms = None
         else:
+            start_time = time.perf_counter()
             move = my_agent(game_obj)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            agent_turn_times.append(elapsed_ms)
 
         next_state = game_obj.simulate_move(move)
 
@@ -597,7 +632,10 @@ def human_vs_agent(human_player: str = "1", max_moves: int = 200, verbose: bool 
             winner = '2'
 
         if verbose:
-            print(f"Player {current_player} plays {move}")
+            if elapsed_ms is not None:
+                print(f"Player {current_player} plays {move} ({elapsed_ms:.1f} ms)")
+            else:
+                print(f"Player {current_player} plays {move}")
 
         if winner:
             if verbose:
@@ -612,6 +650,10 @@ def human_vs_agent(human_player: str = "1", max_moves: int = 200, verbose: bool 
 
     if not winner:
         print("Reached max moves; draw.")
+
+    if agent_turn_times and verbose:
+        avg_ms = sum(agent_turn_times) / len(agent_turn_times)
+        print(f"⏱️ Agent timing: avg {avg_ms:.1f} ms, max {max(agent_turn_times):.1f} ms over {len(agent_turn_times)} turns")
 
 def test_full():
     STUDENT_TOKEN = 'BORIS-GANS'  # e.g., 'JOHN-DOE'
