@@ -208,7 +208,6 @@ def play_game(
     return stats, all_results
 
 def manual_player_solver(game: QuoridorGame) -> List:
-
     """
     Interactive manual player - YOU choose the moves!
     Perfect for testing the game and understanding the rules.
