@@ -90,5 +90,3 @@ class GameClient:
             'move': move_str
         })
         return True
-
-print("✅ GameClient loaded")
