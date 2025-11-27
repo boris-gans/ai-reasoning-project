@@ -36,9 +36,17 @@ class GameClient:
                                 print(f"[DEBUG] Non-JSON response: {response.text[:100]}")
                             return {}
                     return {}
+                elif response.status_code == 400:
+                    # Don't retry on 400 - it means the request/move is invalid
+                    error_msg = response.text[:200]
+                    print(f"❌ HTTP {response.status_code}: {error_msg}")
+                    raise ValueError(f"Bad request (not retrying): {error_msg}")
                 else:
                     print(f"⚠️  HTTP {response.status_code}: {response.text[:200]}")
 
+            except ValueError:
+                # Re-raise ValueError (400 errors) without retrying
+                raise
             except requests.exceptions.Timeout:
                 print(f"⚠️  Request timeout (attempt {attempt + 1}/{max_retries})")
             except requests.exceptions.RequestException as e:
